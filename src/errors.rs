@@ -1,7 +1,7 @@
 use actix_web::{http::StatusCode, HttpResponse, ResponseError};
 use serde::Serialize;
 use std::fmt;
-
+// Centralized error handling for the Luzmo plugin
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub r#type: ErrorType,

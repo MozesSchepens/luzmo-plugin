@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
+// Common types for the Luzmo plugin
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Column {
     #[serde(default)]

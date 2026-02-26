@@ -8,7 +8,7 @@ use crate::engine::filters::apply_filters;
 use crate::engine::plan::{build_plan, QueryPlan};
 use crate::luzmo::types::{Column, QueryRequest};
 use crate::utils::sanitize::{normalize_value, sanitize_json_value};
-
+// Main query execution logic
 fn col_id(c: &Column) -> String {
     c.column_id
         .clone()
@@ -44,7 +44,6 @@ pub fn execute_query(req: &QueryRequest) -> Result<Vec<Vec<Value>>, String> {
     let allowed = ["sum", "count", "avg", "min", "max"];
 
     for m in &plan.measures {
-        // count(*) is ok
         if m.id == "*" && m.agg == "count" {
             continue;
         }

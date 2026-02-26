@@ -3,12 +3,11 @@ use std::collections::HashMap;
 
 use crate::luzmo::types::FilterExpr;
 use crate::utils::sanitize::normalize_value;
-
+// Filter application logic
 fn resolve_column_id(f: &FilterExpr) -> Option<String> {
     f.column_id.clone().or_else(|| f.id.clone())
 }
 
-// ISO strings (YYYY-MM-DD...) zijn lexicografisch vergelijkbaar
 fn cmp_gt(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Number(an), Value::Number(bn)) => an.as_f64().unwrap_or(0.0) > bn.as_f64().unwrap_or(0.0),

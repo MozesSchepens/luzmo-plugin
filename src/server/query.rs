@@ -5,11 +5,10 @@ use crate::engine::execute::run;
 use crate::luzmo::types::QueryRequest;
 use crate::utils::ids::make_req_id;
 use crate::utils::secret::check_secret;
-
+// Main query handler
 pub async fn handle_query(req: HttpRequest, body: web::Bytes) -> HttpResponse {
     let rid = make_req_id();
     
-    // Log request details
     println!("[{}] ===== NEW QUERY REQUEST =====", rid);
     println!("[{}] Headers: {:?}", rid, req.headers());
     
@@ -40,18 +39,33 @@ pub async fn handle_query(req: HttpRequest, body: web::Bytes) -> HttpResponse {
             "message": format!("Unknown dataset id: {}", dataset_id)
         }));
     }
-
+    
     match run(&q) {
         Ok(rows) => {
             println!("[{}] ✓ rows_out={}", rid, rows.len());
             HttpResponse::Ok().json(rows)
         }
-        Err(e) => {
-            println!("[{}] ❌ Query error: {}", rid, e);
-            HttpResponse::InternalServerError().json(json!({
-                "type": { "code": 500, "description": "Internal Server Error" },
-                "message": format!("Query error: {}", e)
-            }))
+                Err(e) => {
+            println!("[{}] Query error: {}", rid, e);
+
+            let is_bad_request =
+                e.contains("Unknown column")
+                || e.contains("Unsupported aggregation")
+                || e.contains("Invalid")
+                || e.contains("Bad request");
+
+            if is_bad_request {
+                HttpResponse::BadRequest().json(json!({
+                    "type": { "code": 400, "description": "Bad Request" },
+                    "message": format!("Query error: {}", e)
+                }))
+            } else {
+                HttpResponse::InternalServerError().json(json!({
+                    "type": { "code": 500, "description": "Internal Server Error" },
+                    "message": format!("Query error: {}", e)
+                }))
+            }
         }
     }
+    
 }

@@ -85,7 +85,6 @@ pub fn execute_aggregation(
             if g.id == "date" && g.level.as_deref() == Some("month") {
                 v = bucket_month(&v);
             }
-            // hierarchy group keys moeten array-pad zijn
             if g.col_type.as_deref() == Some("hierarchy") {
                 if let Value::String(_) = v {
                     v = Value::Array(vec![v]);
@@ -118,7 +117,7 @@ pub fn execute_aggregation(
         }
     }
 
-    // deterministisch
+
     let mut items: Vec<(String, (Vec<Value>, Vec<AggState>))> = groups.into_iter().collect();
     items.sort_by(|a, b| a.0.cmp(&b.0));
 
