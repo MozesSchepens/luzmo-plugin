@@ -1,76 +1,95 @@
 # Luzmo HTTP Plugin -- Rust & Node.js Implementation
 
-Minimal Luzmo plugin implementation with improved error handling,
-structured query execution, and modular architecture.
+A modular HTTP-based Luzmo plugin implemented in Rust (Actix Web).
+This project provides a fully functional custom plugin capable of:
 
-This repository contains two implementations:
+-   Authenticating reaquests from Luzmo
+-   Parsing Luzmo query payloads
+-   Executing filtering and aggregation
+-   Returning fully Luzmo-compatible JSON responses
 
--   Original HTTP plugin (Node.js)
--   Refactored & production-ready version (Rust -- Actix Web)
-
-The Rust implementation is the main and actively maintained version.
+The Rust implementation is the primary and actively maintained version.
 
 ------------------------------------------------------------------------
 
 ## Project Overview
 
-This project implements a custom HTTP-based Luzmo plugin that:
+This plugin implements the Luzmo HTTP connector contract and acts as a custom data source.
 
--   Authenticates incoming requests
--   Parses Luzmo query payloads
--   Builds a structured QueryPlan
--   Executes filtering and aggregation
--   Returns Luzmo-compatible JSON responses
+The execution pipeline:
+1.  HTTP request received
+2.  X-Secret authentication validated
+3.  JSON payload parsed into structured types
+4.  QueryPlan constructed
+5.  Filters applied
+6.  Aggregation executed (if required)
+7.  Luzmo-compatible array-of-arrays response returned
 
-The Rust version introduces a modular architecture for maintainability
-and scalability.
+The architecture is designed to be modular, maintainable and extensible.
 
 ------------------------------------------------------------------------
 
 ## Architecture (Rust Version)
 
-    src/
-    │
-    ├── engine/     → Query processing & execution logic
-    ├── server/     → HTTP layer (Actix endpoints)
-    ├── utils/      → Shared helpers (auth, ids, sanitizing)
-    ├── errors/     → Centralized error handling
-    ├── luzmo/      → Request/response types
-    └── main.rs     → Application entrypoint
-
-### Execution Flow
-
-1.  HTTP request received
-2.  X-Secret authentication validated
-3.  JSON body parsed
-4.  QueryPlan constructed
-5.  Filtering & aggregation executed
-6.  Luzmo-compatible JSON response returned
+src/
+│
+├── engine/
+│   ├── execute.rs       → Orchestrates query execution
+│   ├── aggregation.rs   → Grouping & aggregation logic
+│   ├── filters.rs       → Filter engine
+│   ├── plan.rs          → QueryPlan builder
+│   └── dataset.rs       → Demo dataset & schema mapping
+│
+├── luzmo/
+│   └── types.rs         → Luzmo request/response structs
+│
+├── utils/
+│   ├── secret.rs        → X-Secret validation
+│   ├── ids.rs           → Column ID normalization
+│   └── sanitize.rs      → JSON normalization helpers
+│
+├── errors.rs            → Centralized error handling
+├── lib.rs               → Library exports
+└── main.rs              → Actix server entrypoint
 
 ------------------------------------------------------------------------
 
-## Features (Rust Version)
+## Features
 
--   X-Secret header authentication
--   QueryPlan-based execution pipeline
--   Filtering support:
-    -   equals
-    -   not equals
-    -   greater than / less than
-    -   contains
-    -   in
-    -   is not null
--   Aggregations:
-    -   sum
-    -   avg
-    -   min
-    -   max
-    -   count (including `count(*)`)
--   Month bucketing for date fields
--   Deterministic grouping output
--   JSON sanitizing
--   Health endpoint with timestamp
--   Manual API testing via localhost or ngrok
+Authentication
+-  X-Secret header validation
+
+Filtering
+-  equals / not equals
+-  greater than / less than
+-  in
+-  contains
+-  is null / is not null
+-  Date comparisons (RFC3339 compatible)
+
+Aggregations
+-  sum
+-  avg
+-  min
+-  max
+-  count(including count (*))
+-  Multi-measure support
+
+Date Handling
+-  Month bucketing support
+-  RFC3339 output format
+
+Execution
+-  Raw mode (no aggregation)
+-  Aggreagtion mode (group-by logic)
+-  Deterministic group output
+-  JSON sanitizing for Luzmo compatibility
+
+Testing
+-  Engine-level unit tests
+-  Manual contract testing via PowerShell
+-  End-to-end testing through Luzmo UI
+-  Ngrok traffic inspection
 
 ------------------------------------------------------------------------
 
@@ -85,7 +104,7 @@ Or define environment variables manually:
   -----------------------------------------------------------------------
   Variable               Required             Description
   ---------------------- -------------------- ---------------------------
-  LUZMO_PLUGIN_SECRET    Yes (production)     Secret for X-Secret
+  LUZMO_PLUGIN_SECRET    Yes                  Secret for X-Secret
                                               authentication
 
   PORT                   No                   Default: 3000
@@ -147,16 +166,19 @@ Server runs on:
 
 #### Response format
 
-    {
-      "Count": 10,
-      "value": [...]
-    }
+    [
+      ["A", 123.45],
+      ["B", 456.78]
+    ]
+No wrapper object is returned.
 
 ------------------------------------------------------------------------
 
 ### GET /health
 
     curl http://localhost:3000/health
+
+Returns a simple status response.
 
 ------------------------------------------------------------------------
 
@@ -177,27 +199,25 @@ Server runs on:
 ```
     ngrok http 3000
 
-4.  Use the HTTPS URL in Luzmo as plugin endpoint
+4.  Use the generated HTTPS URL as the Luzmo plugin endpoint.
 
 ------------------------------------------------------------------------
+## Current Status
+-  Fully functional HTTP plugin
+-  Contractually compatible with Luzmo
+-  Stable under normal query load
+-  Modular Rust architecture
+-  Extensively tested (filters, aggregations, edge cases)
 
+------------------------------------------------------------------------
 ## Roadmap
 
-Planned improvements for the Rust implementation:
+Planned improvements:
 
--   Unit tests for engine layer
--   Integration tests for query endpoint
--   Structured logging
--   Configurable dataset sources
 -   Sorting support
--   QueryPlan validation improvements
 -   Pagination support
--   Performance benchmarks
+-   Structured logging
+-   Configurable data sources (beyond demo dataset)
+-   Performance optimizations
+-   Extended integration test coverage
 
-------------------------------------------------------------------------
-
-## Status
-Functional HTTP plugin\
-Modular Rust architecture\
-Luzmo-compatible responses\
-Ongoing improvements
