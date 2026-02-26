@@ -1,0 +1,1 @@
+{"id":"demo","columns":[{"column_id":"date","type":"datetime","level":"month"},{"column_id":"value","type":"numeric","aggregation":"sum"}],"filters":[],"options":{"pushdown":true},"limit":5}

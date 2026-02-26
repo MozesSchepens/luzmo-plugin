@@ -1,0 +1,852 @@
+use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, Responder};
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::env;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+// ===== TYPE DEFINITIONS =====
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Column {
+    #[serde(default)]
+    id: String, // default = "" als niet aanwezig
+    #[serde(default)]
+    column_id: Option<String>,
+    #[serde(default)]
+    aggregation: Option<String>, // sum/avg/min/max/count
+    #[serde(default)]
+    level: Option<String>, // bv. "month" voor date
+    #[serde(default)]
+    r#type: Option<String>, // "numeric", "datetime", "hierarchy", ...
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FilterExpr {
+    #[serde(default)]
+    column_id: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    expression: Option<String>,
+    #[serde(default)]
+    value: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct SortExpr {
+    #[serde(default)]
+    column_id: Option<String>,
+    #[serde(default)]
+    column_index: Option<usize>,
+    #[serde(default)]
+    index: Option<usize>,
+    #[serde(default)]
+    direction: Option<String>,
+    #[serde(default)]
+    order: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[allow(dead_code)]
+pub struct QueryOptions {
+    #[serde(default)]
+    pushdown: bool,
+    #[serde(default)]
+    include_metadata: bool,
+    #[serde(default)]
+    sort: Option<Vec<SortExpr>>,
+    // Luzmo stuurt ook vaak extra fields (timezone_id, query_timeout, ...) → serde laat dat toe.
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueryRequest {
+    #[serde(default)]
+    id: Option<String>,
+
+    #[serde(default)]
+    dataset_id: Option<String>,
+
+    #[serde(default)]
+    columns: Option<Vec<Column>>,
+    #[serde(default)]
+    filters: Option<Vec<FilterExpr>>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    options: Option<QueryOptions>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuthRequest {}
+
+#[derive(Debug, Serialize)]
+pub struct ErrorResponse {
+    r#type: ErrorType,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ErrorType {
+    code: u16,
+    description: String,
+}
+
+// ===== HELPERS =====
+
+fn json_ok_string(payload: &serde_json::Value) -> HttpResponse {
+    match serde_json::to_string(payload) {
+        Ok(s) => {
+            log::info!("OUTGOING_JSON={}", s);
+            HttpResponse::Ok().content_type("application/json").body(s)
+        }
+        Err(e) => {
+            log::error!("JSON_SERIALIZE_FAILED: {}", e);
+            HttpResponse::InternalServerError()
+                .content_type("application/json")
+                .body(format!(r#"{{"error":"serialize_failed","details":"{}"}}"#, e))
+        }
+    }
+}
+
+fn col_id(col: &Column) -> String {
+    col.column_id
+        .clone()
+        .or_else(|| {
+            if col.id.is_empty() {
+                None
+            } else {
+                Some(col.id.clone())
+            }
+        })
+        .unwrap_or_default()
+}
+
+fn make_req_id() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    format!("{:x}", now)
+}
+
+fn normalize_value(v: &Value) -> Value {
+    // Luzmo stuurt soms wrappers als ["2025-..."] of [19.95]
+    match v {
+        Value::Array(arr) if arr.len() == 1 => arr[0].clone(),
+        _ => v.clone(),
+    }
+}
+
+// ISO strings kan je lexicografisch vergelijken (YYYY-MM-DDTHH:mm:ssZ)
+fn cmp_gt(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(an), Value::Number(bn)) => {
+            an.as_f64().unwrap_or(0.0) > bn.as_f64().unwrap_or(0.0)
+        }
+        (Value::String(as_), Value::String(bs)) => as_ > bs,
+        _ => false,
+    }
+}
+fn cmp_ge(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(an), Value::Number(bn)) => {
+            an.as_f64().unwrap_or(0.0) >= bn.as_f64().unwrap_or(0.0)
+        }
+        (Value::String(as_), Value::String(bs)) => as_ >= bs,
+        _ => false,
+    }
+}
+fn cmp_lt(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(an), Value::Number(bn)) => {
+            an.as_f64().unwrap_or(0.0) < bn.as_f64().unwrap_or(0.0)
+        }
+        (Value::String(as_), Value::String(bs)) => as_ < bs,
+        _ => false,
+    }
+}
+fn cmp_le(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(an), Value::Number(bn)) => {
+            an.as_f64().unwrap_or(0.0) <= bn.as_f64().unwrap_or(0.0)
+        }
+        (Value::String(as_), Value::String(bs)) => as_ <= bs,
+        _ => false,
+    }
+}
+
+// ===== DATASET DEFINITION =====
+
+fn get_dataset() -> Value {
+    json!({
+        "id": "demo",
+        "name": {"en": "Sample Dataset"},
+        "description": {"en": "Demo dataset with category, date and value metrics"},
+        "properties": {
+            "row_limit": 100000,
+            "supports_pushdown": true,
+            "supports_sorting": true
+        },
+        "columns": [
+            {
+                "id": "category",
+                "name": {"en": "Category"},
+                "type": "string",
+                "properties": {
+                    "display_name": {"en": "Category"},
+                    "filterable": true,
+                    "groupable": true
+                }
+            },
+            {
+                "id": "date",
+                "name": {"en": "Date"},
+                "type": "datetime",
+                "subtype": "date",
+                "properties": {
+                    "display_name": {"en": "Date"},
+                    "filterable": true,
+                    "groupable": true,
+                    "format": "YYYY-MM-DD"
+                }
+            },
+            {
+                "id": "value",
+                "name": {"en": "Value"},
+                "type": "numeric",
+                "properties": {
+                    "display_name": {"en": "Value"},
+                    "filterable": true,
+                    "aggregable": true,
+                    "format": "0.00"
+                }
+            }
+        ]
+    })
+}
+
+// ===== DATA GENERATION =====
+
+fn generate_data() -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    let categories = vec!["A", "B", "C", "D", "E", "F"];
+    let mut seed: u64 = 123;
+
+    let mut rng = || {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        (seed as f64) / (u64::MAX as f64)
+    };
+
+    let start_day = 1;
+
+    for d in 0..180 {
+        let total_days = start_day + d;
+        let month = ((total_days - 1) / 30) + 1;
+        let day = ((total_days - 1) % 30) + 1;
+        let date_str = format!("2025-{:02}-{:02}T00:00:00.000Z", month.min(12), day.min(31));
+
+        for category in &categories {
+            let n = 1 + (rng() * 5.0) as usize;
+            for _ in 0..n {
+                let base = 5.0 + rng() * 50.0;
+                let seasonal = 10.0 * ((2.0 * std::f64::consts::PI * d as f64) / 30.0).sin();
+                let noise = rng() * 5.0;
+                let value = (base + seasonal + noise).max(0.0);
+                let rounded = (value * 100.0).round() / 100.0;
+
+                rows.push(vec![
+                    json!(category.to_string()),
+                    json!(date_str.clone()),
+                    json!(rounded),
+                ]);
+            }
+        }
+    }
+    rows
+}
+
+// ===== FILTERS =====
+
+fn resolve_column_id(f: &FilterExpr) -> Option<String> {
+    f.column_id.clone().or_else(|| f.id.clone())
+}
+
+fn apply_filters(
+    rows: &Vec<Vec<Value>>,
+    filters: Option<Vec<FilterExpr>>,
+    col_index: &HashMap<String, usize>,
+) -> Result<Vec<Vec<Value>>, String> {
+    let Some(filters) = filters else {
+        return Ok(rows.clone());
+    };
+    if filters.is_empty() {
+        return Ok(rows.clone());
+    }
+
+    let mut result = rows.clone();
+
+    for filter in filters {
+        let col = resolve_column_id(&filter).unwrap_or_default();
+        let expr = filter.expression.as_deref();
+
+        let raw_val = filter.value.as_ref().map(normalize_value);
+
+        let idx = match col_index.get(&col) {
+            Some(&i) => i,
+            None => continue,
+        };
+
+        result = match expr {
+            Some("is not null") => result
+                .into_iter()
+                .filter(|row| row.get(idx).map(|v| !v.is_null()).unwrap_or(false))
+                .collect(),
+
+            Some("in") => {
+                let vals = match filter.value.clone() {
+                    Some(Value::Array(v)) => v,
+                    _ => continue,
+                };
+
+                let vals_norm: Vec<Value> = vals.into_iter().map(|x| normalize_value(&x)).collect();
+
+                result
+                    .into_iter()
+                    .filter(|row| {
+                        row.get(idx)
+                            .map(|v| {
+                                let v = normalize_value(v);
+                                vals_norm.contains(&v)
+                            })
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            }
+
+            Some("=") | Some("==") => {
+                let cmp_val = raw_val.clone().unwrap_or(Value::Null);
+                result
+                    .into_iter()
+                    .filter(|row| {
+                        row.get(idx)
+                            .map(|v| normalize_value(v) == cmp_val)
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            }
+
+            Some("!=") | Some("!==") => {
+                let cmp_val = raw_val.clone().unwrap_or(Value::Null);
+                result
+                    .into_iter()
+                    .filter(|row| {
+                        row.get(idx)
+                            .map(|v| normalize_value(v) != cmp_val)
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            }
+
+            Some(">=") => {
+                let cmp_val = raw_val.clone().unwrap_or(Value::Null);
+                result
+                    .into_iter()
+                    .filter(|row| row.get(idx).map_or(false, |v| cmp_ge(v, &cmp_val)))
+                    .collect()
+            }
+
+            Some(">") => {
+                let cmp_val = raw_val.clone().unwrap_or(Value::Null);
+                result
+                    .into_iter()
+                    .filter(|row| row.get(idx).map_or(false, |v| cmp_gt(v, &cmp_val)))
+                    .collect()
+            }
+
+            Some("<=") => {
+                let cmp_val = raw_val.clone().unwrap_or(Value::Null);
+                result
+                    .into_iter()
+                    .filter(|row| row.get(idx).map_or(false, |v| cmp_le(v, &cmp_val)))
+                    .collect()
+            }
+
+            Some("<") => {
+                let cmp_val = raw_val.clone().unwrap_or(Value::Null);
+                result
+                    .into_iter()
+                    .filter(|row| row.get(idx).map_or(false, |v| cmp_lt(v, &cmp_val)))
+                    .collect()
+            }
+
+            Some("contains") | Some("like") => {
+                let needle = raw_val
+                    .as_ref()
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+
+                result
+                    .into_iter()
+                    .filter(|row| {
+                        row.get(idx)
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_lowercase()
+                            .contains(&needle)
+                    })
+                    .collect()
+            }
+
+            _ => result,
+        };
+    }
+
+    Ok(result)
+}
+
+// ===== AGGREGATION / GROUPING =====
+
+#[derive(Default, Clone)]
+struct AggState {
+    count: f64,
+    sum: f64,
+    min: Option<f64>,
+    max: Option<f64>,
+}
+
+fn bucket_month(v: &Value) -> Value {
+    if let Value::String(s) = v {
+        if s.len() >= 7 {
+            return Value::String(format!("{}-01T00:00:00.000Z", &s[0..7]));
+        }
+    }
+    v.clone()
+}
+
+fn datacolumns_index() -> HashMap<String, usize> {
+    let mut map = HashMap::new();
+    map.insert("category".to_string(), 0);
+    map.insert("date".to_string(), 1);
+    map.insert("value".to_string(), 2);
+    map
+}
+
+// ===== SECRET MANAGEMENT =====
+
+fn check_secret(req: &HttpRequest) -> Result<(), HttpResponse> {
+    let secret = req
+        .headers()
+        .get("X-Secret")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
+
+    let expected_secret = env::var("LUZMO_PLUGIN_SECRET").or_else(|_| {
+        let env_mode = env::var("NODE_ENV").unwrap_or_default();
+        if env_mode == "development" {
+            Ok("dev_secret".to_string())
+        } else {
+            Err("SECRET_NOT_SET".to_string())
+        }
+    });
+
+    match expected_secret {
+        Ok(expected) if secret.as_ref() == Some(&expected) => Ok(()),
+        _ => Err(
+            HttpResponse::Unauthorized()
+                .content_type("application/json")
+                .json(ErrorResponse {
+                    r#type: ErrorType {
+                        code: 401,
+                        description: "Unauthorized".to_string(),
+                    },
+                    message: if secret.is_none() {
+                        "Missing X-Secret header".to_string()
+                    } else {
+                        "Invalid X-Secret".to_string()
+                    },
+                }),
+        ),
+    }
+}
+
+// ===== ROUTE HANDLERS =====
+
+async fn authorize(req: HttpRequest) -> HttpResponse {
+    match check_secret(&req) {
+        Ok(_) => HttpResponse::Ok().json(json!({ "ok": true })),
+        Err(resp) => resp,
+    }
+}
+
+async fn datasets(req: HttpRequest) -> HttpResponse {
+    match check_secret(&req) {
+        Ok(_) => HttpResponse::Ok().json(vec![get_dataset()]),
+        Err(resp) => resp,
+    }
+}
+
+async fn query(req: HttpRequest, body: web::Bytes) -> HttpResponse {
+    if let Err(resp) = check_secret(&req) {
+        return resp;
+    }
+
+    let rid = make_req_id();
+    let raw = String::from_utf8_lossy(&body);
+    println!("[{}] /query raw body:\n{}", rid, raw);
+
+    let parsed: Result<QueryRequest, _> = serde_json::from_slice(&body[..]);
+    let body_parsed = match parsed {
+        Ok(b) => b,
+        Err(e) => {
+            println!("[{}] Json deserialize error: {}", rid, e);
+            return HttpResponse::BadRequest()
+                .content_type("application/json")
+                .body(format!(r#"{{"error":"bad_request","details":"{}"}}"#, e));
+        }
+    };
+
+    let dataset_id = body_parsed
+        .dataset_id
+        .clone()
+        .or_else(|| body_parsed.id.clone())
+        .unwrap_or_default();
+
+    let cols_len = body_parsed.columns.as_ref().map(|c| c.len()).unwrap_or(0);
+    println!(
+        "[{}] /query dataset_id={} limit={:?} cols={}",
+        rid, dataset_id, body_parsed.limit, cols_len
+    );
+
+    if dataset_id != "demo" {
+        return HttpResponse::NotFound().json(ErrorResponse {
+            r#type: ErrorType {
+                code: 404,
+                description: "Not Found".to_string(),
+            },
+            message: format!("Unknown dataset id: {}", dataset_id),
+        });
+    }
+
+    if let Some(limit) = body_parsed.limit {
+        if limit < 1 {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                r#type: ErrorType {
+                    code: 400,
+                    description: "Bad Request".to_string(),
+                },
+                message: "Limit must be a positive number".to_string(),
+            });
+        }
+    }
+
+    match execute_query(
+        body_parsed.columns.clone(),
+        body_parsed.filters.clone(),
+        body_parsed.limit,
+        body_parsed.options.clone().unwrap_or_default(),
+    ) {
+        Ok(rows) => {
+            println!("[{}] ✓ rows_out={}", rid, rows.len());
+            let payload = serde_json::json!({
+                "value": rows,
+                "Count": rows.len() as i64
+            });
+            json_ok_string(&payload)
+        }
+        Err(e) => {
+            println!("[{}] ❌ Query error: {}", rid, e);
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                r#type: ErrorType {
+                    code: 500,
+                    description: "Internal Server Error".to_string(),
+                },
+                message: format!("Query error: {}", e),
+            })
+        }
+    }
+}
+
+async fn health(_req: HttpRequest) -> HttpResponse {
+    HttpResponse::Ok().json(json!({
+        "ok": true,
+        "timestamp": Utc::now().to_rfc3339()
+    }))
+}
+
+async fn root(_req: HttpRequest) -> HttpResponse {
+    HttpResponse::Ok().body("OK")
+}
+
+async fn execute(req: HttpRequest, body: web::Json<Value>) -> impl Responder {
+    if let Err(resp) = check_secret(&req) {
+        return resp;
+    }
+    HttpResponse::Ok().json(json!({
+        "ok": true,
+        "endpoint": "execute",
+        "received": body.into_inner()
+    }))
+}
+
+fn format_cell_for_luzmo(_col: &Column, v: Value) -> Value {
+    normalize_value(&v)
+}
+
+fn execute_query(
+    columns: Option<Vec<Column>>,
+    filters: Option<Vec<FilterExpr>>,
+    limit: Option<usize>,
+    _options: QueryOptions,
+) -> Result<Vec<Vec<Value>>, String> {
+    // 1) data + index
+    let data = generate_data();
+    let col_index = datacolumns_index();
+
+    // 2) filters
+    let rows = apply_filters(&data, filters, &col_index)?;
+
+    // 3) request columns
+    let cols = columns.unwrap_or_default();
+
+    let find_col = |cid: &str| -> Option<&Column> {
+        cols.iter().find(|c| col_id(c) == cid)
+    };
+
+    // Als Luzmo geen columns doorstuurt: raw terug
+    if cols.is_empty() {
+        let mut out: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
+        for mut r in rows.into_iter() {
+            for cell in r.iter_mut() {
+                *cell = normalize_value(cell);
+            }
+            out.push(r);
+        }
+        if let Some(l) = limit {
+            out.truncate(l);
+        }
+        return Ok(out);
+    }
+
+    // 4) detecteer aggregaties
+    let has_agg = cols.iter().any(|c| c.aggregation.as_deref().unwrap_or("").len() > 0);
+
+    // RAW MODE
+    if !has_agg {
+        let mut out: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
+
+        for r in rows.into_iter() {
+            let mut row_out: Vec<Value> = Vec::with_capacity(cols.len());
+
+            for c in cols.iter() {
+                let cid = col_id(c);
+                let idx = col_index
+                    .get(&cid)
+                    .ok_or_else(|| format!("Unknown column in request: {}", cid))?;
+
+                let raw = r.get(*idx).cloned().unwrap_or(Value::Null);
+
+                let mut v = format_cell_for_luzmo(c, raw);
+
+                if cid == "date" && c.level.as_deref() == Some("month") {
+                    v = bucket_month(&v);
+                }
+
+                row_out.push(v);
+            }
+
+            out.push(row_out);
+        }
+
+        if let Some(l) = limit {
+            out.truncate(l);
+        }
+        return Ok(out);
+    }
+
+    // ==========================
+    // AGG MODE (CRITICAL FIX)
+    // ==========================
+    //
+    // Luzmo stuurt soms helper queries zoals:
+    //   category (hierarchy), value (numeric raw), count(*)
+    // Als je raw numeric ("value") als group key gebruikt, explodeert dit naar 1496 rows.
+    // Fix: in agg-mode NEVER use raw numeric cols (aggregation==None) as group keys.
+    //
+
+    let mut group_cols: Vec<(String, Option<String>)> = vec![]; // (col_id, level)
+    let mut measures: Vec<(String, String)> = vec![]; // (col_id, agg)
+
+    for c in &cols {
+        let cid = col_id(c);
+        let agg = c.aggregation.clone().unwrap_or_default();
+
+        if agg.is_empty() {
+            // ✅ skip raw numeric columns in agg-mode
+            let is_numeric = c.r#type.as_deref() == Some("numeric");
+            if is_numeric {
+                continue;
+            }
+            group_cols.push((cid, c.level.clone()));
+        } else {
+            measures.push((cid, agg));
+        }
+    }
+
+    let mut groups: HashMap<String, (Vec<Value>, Vec<AggState>)> = HashMap::new();
+
+    for r in rows.iter() {
+        let mut gvals: Vec<Value> = Vec::with_capacity(group_cols.len());
+
+        for (gid, level) in &group_cols {
+            let idx = col_index
+                .get(gid)
+                .ok_or_else(|| format!("Unknown group column: {}", gid))?;
+
+            let raw = r.get(*idx).cloned().unwrap_or(Value::Null);
+
+            let mut v = if let Some(cm) = find_col(gid) {
+                format_cell_for_luzmo(cm, raw)
+            } else {
+                normalize_value(&raw)
+            };
+
+            if gid == "date" && level.as_deref() == Some("month") {
+                v = bucket_month(&v);
+            }
+
+            gvals.push(v);
+        }
+
+        let key = serde_json::to_string(&gvals).unwrap_or_default();
+        let entry = groups
+            .entry(key)
+            .or_insert_with(|| (gvals.clone(), vec![AggState::default(); measures.len()]));
+
+        for (mi, (mid, agg)) in measures.iter().enumerate() {
+            let st = &mut entry.1[mi];
+
+            match agg.as_str() {
+                "count" => {
+                    if mid == "*" {
+                        st.count += 1.0;
+                    } else {
+                        let idx = col_index
+                            .get(mid)
+                            .ok_or_else(|| format!("Unknown measure column: {}", mid))?;
+                        let raw = r.get(*idx).cloned().unwrap_or(Value::Null);
+                        let v = normalize_value(&raw);
+                        if !v.is_null() {
+                            st.count += 1.0;
+                        }
+                    }
+                }
+                "sum" | "avg" | "min" | "max" => {
+                    let idx = col_index
+                        .get(mid)
+                        .ok_or_else(|| format!("Unknown measure column: {}", mid))?;
+                    let raw = r.get(*idx).cloned().unwrap_or(Value::Null);
+                    let v = normalize_value(&raw);
+
+                    if let Some(n) = v.as_f64() {
+                        st.count += 1.0;
+                        st.sum += n;
+                        st.min = Some(st.min.map(|m| m.min(n)).unwrap_or(n));
+                        st.max = Some(st.max.map(|m| m.max(n)).unwrap_or(n));
+                    }
+                }
+                _ => return Err(format!("Unsupported aggregation: {}", agg)),
+            }
+        }
+    }
+
+    fn round2f(x: f64) -> f64 {
+        (x * 100.0).round() / 100.0
+    }
+
+    let mut items: Vec<(String, (Vec<Value>, Vec<AggState>))> = groups.into_iter().collect();
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut out: Vec<Vec<Value>> = Vec::with_capacity(items.len());
+
+    for (_k, (gvals, mstates)) in items.into_iter() {
+        let mut row: Vec<Value> = vec![];
+        row.extend(gvals);
+
+        for (mi, (_mid, agg)) in measures.iter().enumerate() {
+            let st = &mstates[mi];
+            let v = match agg.as_str() {
+                "count" => json!(st.count as i64),
+                "sum" => json!(round2f(st.sum)),
+                "avg" => json!(if st.count > 0.0 { round2f(st.sum / st.count) } else { 0.0 }),
+                "min" => json!(round2f(st.min.unwrap_or(0.0))),
+                "max" => json!(round2f(st.max.unwrap_or(0.0))),
+                _ => Value::Null,
+            };
+            row.push(v);
+        }
+
+        out.push(row);
+    }
+
+    if let Some(l) = limit {
+        out.truncate(l);
+    }
+
+    Ok(out)
+}
+
+// ===== MAIN =====
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    dotenv::dotenv().ok();
+    env_logger::init();
+
+    let secret = env::var("LUZMO_PLUGIN_SECRET").or_else(|_| {
+        let env_mode = env::var("NODE_ENV").unwrap_or_default();
+        if env_mode == "development" {
+            Ok("dev_secret".to_string())
+        } else {
+            Err("NOT_SET".to_string())
+        }
+    });
+
+    match secret {
+        Ok(s) => {
+            let is_prod = env::var("NODE_ENV").is_ok();
+            println!("✓ Using secret: {}", if is_prod { "***" } else { &s });
+        }
+        Err(_) => {
+            println!("❌ LUZMO_PLUGIN_SECRET is not set. Set it and restart.");
+            std::process::exit(1);
+        }
+    }
+
+    let env_mode = env::var("NODE_ENV").unwrap_or_else(|_| "development".to_string());
+    println!("✓ Environment: {}", env_mode);
+
+    let port = env::var("PORT")
+        .unwrap_or_else(|_| "3000".to_string())
+        .parse::<u16>()
+        .unwrap_or(3000);
+
+    println!("✓ Server running on http://0.0.0.0:{}", port);
+
+    HttpServer::new(|| {
+        App::new()
+            .route("/", web::get().to(root))
+            .route("/health", web::get().to(health))
+            .route("/authorize", web::post().to(authorize))
+            .route("/datasets", web::get().to(datasets))
+            .route("/datasets", web::post().to(datasets))
+            .route("/query", web::post().to(query))
+            .route("/execute", web::post().to(execute))
+    })
+    .bind(("0.0.0.0", port))?
+    .run()
+    .await
+}
