@@ -31,26 +31,26 @@ The architecture is designed to be modular, maintainable and extensible.
 
 ## Architecture (Rust Version)
 
-src/
-│
-├── engine/
-│   ├── execute.rs       → Orchestrates query execution
-│   ├── aggregation.rs   → Grouping & aggregation logic
-│   ├── filters.rs       → Filter engine
-│   ├── plan.rs          → QueryPlan builder
-│   └── dataset.rs       → Demo dataset & schema mapping
-│
-├── luzmo/
-│   └── types.rs         → Luzmo request/response structs
-│
-├── utils/
-│   ├── secret.rs        → X-Secret validation
-│   ├── ids.rs           → Column ID normalization
-│   └── sanitize.rs      → JSON normalization helpers
-│
-├── errors.rs            → Centralized error handling
-├── lib.rs               → Library exports
-└── main.rs              → Actix server entrypoint
+    src/
+    │
+    ├── engine/
+    │   ├── execute.rs       → Orchestrates query execution
+    │   ├── aggregation.rs   → Grouping & aggregation logic
+    │   ├── filters.rs       → Filter engine
+    │   ├── plan.rs          → QueryPlan builder
+    │   └── dataset.rs       → Demo dataset & schema mapping
+    │
+    ├── luzmo/
+    │   └── types.rs         → Luzmo request/response structs
+    │
+    ├── utils/
+    │   ├── secret.rs        → X-Secret validation
+    │   ├── ids.rs           → Column ID normalization
+    │   └── sanitize.rs      → JSON normalization helpers
+    │
+    ├── errors.rs            → Centralized error handling
+    ├── lib.rs               → Library exports
+    └── main.rs              → Actix server entrypoint
 
 ------------------------------------------------------------------------
 
