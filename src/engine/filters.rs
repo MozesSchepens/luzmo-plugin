@@ -37,6 +37,21 @@ fn cmp_le(a: &Value, b: &Value) -> bool {
         _ => false,
     }
 }
+fn normalize_op(op: Option<&str>) -> Option<&str> {
+    match op?.trim(){
+        ">"|"greater_than" => Some(">"),
+        ">="|"greater_than_or_equal" => Some(">="),
+        "<"|"less_than" => Some("<"),
+        "<="|"less_than_or_equal" => Some("<="),
+        "="|"=="|"equal" => Some("=="),
+        "!="|"!=="|"not_equal" => Some("!="),
+        "in" => Some("in"),
+        "contains"| "like" => Some("contains"),
+        "is missing"|"is null" =>Some("is null"),
+        "is not missing"|"is not null" => Some("is not null"),
+        other => Some(other),
+    }
+}
 
 pub fn apply_filters(
     rows: &[Vec<Value>],
@@ -54,8 +69,7 @@ pub fn apply_filters(
 
     for f in filters {
         let col = resolve_column_id(&f).unwrap_or_default();
-        let expr = f.expression.as_deref();
-
+        let expr = normalize_op(f.expression.as_deref());
         let idx = match col_index.get(&col) {
             Some(&i) => i,
             None => continue,
@@ -72,7 +86,8 @@ pub fn apply_filters(
             Some("in") => {
                 let vals = match f.value {
                     Some(Value::Array(v)) => v,
-                    _ => continue,
+                    Some(v) => vec![v],
+                    None => continue,
                 };
                 let vals_norm: Vec<Value> = vals.into_iter().map(|x| normalize_value(&x)).collect();
 

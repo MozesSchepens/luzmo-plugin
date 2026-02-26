@@ -21,9 +21,11 @@ pub struct FilterExpr {
     pub column_id: Option<String>,
     #[serde(default)]
     pub id: Option<String>,
-    #[serde(default)]
+
+    #[serde(default, alias = "operator")]
     pub expression: Option<String>,
-    #[serde(default)]
+
+    #[serde(default, alias = "values")]
     pub value: Option<Value>,
 }
 

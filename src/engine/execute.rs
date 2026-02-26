@@ -21,6 +21,15 @@ pub fn run(req: &QueryRequest) -> Result<Vec<Vec<Value>>, String> {
 }
 
 pub fn execute_query(req: &QueryRequest) -> Result<Vec<Vec<Value>>, String> {
+    let dataset_id = req
+        .dataset_id
+        .as_deref()
+        .or(req.id.as_deref())
+        .unwrap_or("");
+
+    if dataset_id != "demo" {
+        return Err(format!("Unknown dataset_id: {}", dataset_id));
+    }
     let data = generate_data();
     let col_index: HashMap<String, usize> = col_index_map();
     
@@ -32,7 +41,17 @@ pub fn execute_query(req: &QueryRequest) -> Result<Vec<Vec<Value>>, String> {
 
     // plan (heeft has_agg + requested_cols)
     let plan: QueryPlan = build_plan(req, col_index.clone())?;
+    let allowed = ["sum", "count", "avg", "min", "max"];
 
+    for m in &plan.measures {
+        // count(*) is ok
+        if m.id == "*" && m.agg == "count" {
+            continue;
+        }
+        if !allowed.contains(&m.agg.as_str()) {
+            return Err(format!("Unsupported aggregation: {}", m.agg));
+        }
+    }
     // geen columns: raw
     if plan.requested_cols.is_empty() {
         let mut out = vec![];
