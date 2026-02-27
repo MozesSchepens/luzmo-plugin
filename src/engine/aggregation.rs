@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use crate::engine::plan::{Measure, QueryPlan};
+use crate::errors::PluginError;
 use crate::utils::sanitize::{normalize_value, sanitize_json_value};
 
 #[derive(Default, Clone)]
@@ -26,7 +27,7 @@ pub fn bucket_month(v: &Value) -> Value {
     v.clone()
 }
 
-fn measure_update(st: &mut AggState, m: &Measure, raw: Value) -> Result<(), String> {
+fn measure_update(st: &mut AggState, m: &Measure, raw: Value) -> Result<(), PluginError> {
     match m.agg.as_str() {
         "count" => {
             if m.id == "*" {
@@ -49,7 +50,9 @@ fn measure_update(st: &mut AggState, m: &Measure, raw: Value) -> Result<(), Stri
             }
             Ok(())
         }
-        _ => Err(format!("Unsupported aggregation: {}", m.agg)),
+        _ => Err(PluginError::UnsupportedAggregation {
+            message: format!("Unsupported aggregation: {}", m.agg),
+        }),
     }
 }
 
@@ -68,16 +71,16 @@ pub fn execute_aggregation(
     rows: &[Vec<Value>],
     plan: &QueryPlan,
     col_index: &HashMap<String, usize>,
-) -> Result<Vec<Vec<Value>>, String> {
+) -> Result<Vec<Vec<Value>>, PluginError> {
     let mut groups: HashMap<String, (Vec<Value>, Vec<AggState>)> = HashMap::new();
 
     for r in rows {
         let mut gvals: Vec<Value> = Vec::with_capacity(plan.group_cols.len());
 
         for g in &plan.group_cols {
-            let idx = *col_index
-                .get(&g.id)
-                .ok_or_else(|| format!("Unknown group column: {}", g.id))?;
+            let idx = *col_index.get(&g.id).ok_or_else(|| PluginError::UnknownColumn {
+                message: format!("Unknown group column: {}", g.id),
+            })?;
 
             let mut v = r.get(idx).cloned().unwrap_or(Value::Null);
             v = normalize_value(&v);
@@ -108,15 +111,14 @@ pub fn execute_aggregation(
                 continue;
             }
 
-            let idx = *col_index
-                .get(&m.id)
-                .ok_or_else(|| format!("Unknown measure column: {}", m.id))?;
+            let idx = *col_index.get(&m.id).ok_or_else(|| PluginError::UnknownColumn {
+                message: format!("Unknown measure column: {}", m.id),
+            })?;
 
             let raw = r.get(idx).cloned().unwrap_or(Value::Null);
             measure_update(st, m, raw)?;
         }
     }
-
 
     let mut items: Vec<(String, (Vec<Value>, Vec<AggState>))> = groups.into_iter().collect();
     items.sort_by(|a, b| a.0.cmp(&b.0));

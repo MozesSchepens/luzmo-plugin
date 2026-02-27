@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::luzmo::types::{Column, FilterExpr, QueryRequest};
-
+use crate::errors::PluginError;
 #[derive(Debug, Clone)]
 pub struct GroupCol {
     pub id: String,
@@ -34,7 +34,7 @@ fn col_id(c: &Column) -> String {
         .unwrap_or_default()
 }
 
-pub fn build_plan(req: &QueryRequest, col_index: HashMap<String, usize>) -> Result<QueryPlan, String> {
+pub fn build_plan(req: &QueryRequest,col_index: HashMap<String, usize>,) -> Result<QueryPlan, PluginError> {
     let dataset_id = req
         .dataset_id
         .clone()
@@ -50,7 +50,9 @@ pub fn build_plan(req: &QueryRequest, col_index: HashMap<String, usize>) -> Resu
             continue;
         }
         if !cid.is_empty() && !col_index.contains_key(&cid) {
-            return Err(format!("Unknown column in request: {}", cid));
+        return Err(PluginError::UnknownColumn {
+            message: format!("Unknown column in request: {}", cid),
+        });        
         }
     }
 
